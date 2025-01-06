@@ -1,0 +1,442 @@
+---
+title: "Behind the Line: Assessing the Impact of Motion Alignments in NFL Man vs. Zone Coverage -- NFL Big Data Bowl 2025"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+#### Introduction
+
+In the National Football League (NFL), defensive schemes oscillate between man and zone coverage to counter opposing offenses. By studying how these coverage choices correlate with offensive outcomes, we can gain deeper insights into strategic decision-making on both sides of the ball. Utilizing advanced metrics such as Expected Points (EP) and Expected Points Added (EPA) allows us to quantify the effect of these coverage decisions on a play-by-play basis. When combined with information about player alignments and motions, this analysis provides a nuanced perspective on how subtle pre-snap changes can shape the ensuing play.
+
+#### Data Cleaning and Preparation
+
+Prior to any detailed analysis, thorough data cleaning and preparation were essential. This involved reviewing all columns in the NFL tracking dataset to ensure completeness and consistency. Plays with incorrect or corrupted tracking data were removed to maintain accuracy. Additionally, cases where key variables—such as the presence or absence of pre-snap motion—were missing or improperly recorded were excluded. By filtering out these problematic entries, the resulting dataset offered a reliable foundation for examining the relationships between coverage schemes, pre-snap motions, and eventual play outcomes.
+
+I will use the following datasets in my analysis:
+
+-   **complete_plays**: Contains all plays, including those with and without motion, along with the player in motion for each play.
+
+-   **clean_Tracking**: Includes tracking data for each player in motion, such as their distance to the ball at the snap.
+
+-   **plays**: Provides play-level information for each play.
+
+-   **games**: Contains game-level information for each game.
+
+-   **players**: Includes player-level information for each player.
+
+#### Project Overview
+
+In this project, we begin by examining the overall distributions of Expected Points (EP) and Expected Points Added (EPA) for plays in which man or zone coverage was deployed. These initial density plots offer a high-level snapshot of how each coverage type generally influences play outcomes. Building on this foundation, the analysis then focuses on how the alignment of a player in motion—whether as an outside receiver, slot receiver, or aligned behind the offensive line—interacts with the chosen coverage scheme and impacts mean EPA. By grouping and comparing mean EPA across different alignment-and-coverage combinations, we aim to shed light on how specific offensive strategies affect defensive decisions, and ultimately, how they influence the success of a play.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(purrr)
+library(nflplotR)
+library(gridExtra)
+
+games <- read_csv("Downloads/nfl-big-data-bowl-2025/games.csv")
+playerplays<- read_csv("Downloads/nfl-big-data-bowl-2025/player_play.csv")
+players<- read_csv("Downloads/nfl-big-data-bowl-2025/players.csv")
+plays <- read_csv("Downloads/nfl-big-data-bowl-2025/plays.csv")
+tracking1<- read_csv("Downloads/nfl-big-data-bowl-2025/tracking_week_1.csv",show_col_types = FALSE)
+tracking2<- read_csv("Downloads/nfl-big-data-bowl-2025/tracking_week_2.csv",show_col_types = FALSE)
+tracking3<- read_csv("Downloads/nfl-big-data-bowl-2025/tracking_week_3.csv",show_col_types = FALSE)
+tracking4<- read_csv("Downloads/nfl-big-data-bowl-2025/tracking_week_4.csv",show_col_types = FALSE)
+tracking5<- read_csv("Downloads/nfl-big-data-bowl-2025/tracking_week_5.csv",show_col_types = FALSE)
+tracking6<- read_csv("Downloads/nfl-big-data-bowl-2025/tracking_week_6.csv",show_col_types = FALSE)
+tracking7<- read_csv("Downloads/nfl-big-data-bowl-2025/tracking_week_7.csv",show_col_types = FALSE)
+tracking8<- read_csv("Downloads/nfl-big-data-bowl-2025/tracking_week_8.csv",show_col_types = FALSE)
+tracking9<- read_csv("Downloads/nfl-big-data-bowl-2025/tracking_week_9.csv",show_col_types = FALSE)
+```
+
+```{r echo=FALSE}
+plays <- plays %>%
+  filter((is.na(qbSpike) | qbSpike != 1) & (is.na(qbKneel) | qbKneel != 1))
+
+indexes <- plays %>% 
+  select(gameId, playId)
+
+motionEligblePlays <- indexes %>% 
+  inner_join(playerplays, by = c("gameId", "playId")) %>%
+  group_by(gameId, playId) %>%
+  filter(sum(is.na(motionSinceLineset)) < 15)  # Keep groups with <= 15 NAs
+
+
+MotionCount<-plays %>% inner_join(motionEligblePlays, by = c('gameId' ,'playId')) %>% group_by(gameId, playId) %>% summarise(motion = sum(motionSinceLineset, na.rm = TRUE),atSnap=sum(inMotionAtBallSnap, na.rm = TRUE),.groups = "drop")
+
+playsWithMotionCount<-plays %>% inner_join(MotionCount, by = c('gameId' ,'playId'))
+playsWithMotionCount$motionBoolean <- ifelse(playsWithMotionCount$motion > 0, 1, 0)
+games_filtered<-games %>% select(c(gameId, homeTeamAbbr))
+playsWithMotionCount<-playsWithMotionCount %>% inner_join(games_filtered, by='gameId')
+
+
+playsWithoutMotion<- playsWithMotionCount %>% filter(motion==0)
+
+filtered_playerplays<- playerplays %>% select(c(gameId,playId,nflId,motionSinceLineset,inMotionAtBallSnap))
+filtered_player <- players %>%
+  select(nflId, position, displayName)
+
+temp <- playsWithMotionCount %>%
+  # keep only plays that have motion == 1
+  filter(motion == 1) %>% 
+  left_join(filtered_playerplays, by = c("gameId", "playId")) %>%
+  # now filter to keep only the one(s) in motion
+  filter(motionSinceLineset == 1) 
+
+
+temp2 <- playsWithMotionCount %>%
+  filter(motion > 1 & atSnap==1) %>%
+  left_join(filtered_playerplays, by = c("gameId", "playId")) %>%
+  filter(inMotionAtBallSnap == 1)
+
+
+# 1) Identify multi-motion plays w/o motion at snap
+multiMotionsPlaysWithoutAtSnap <- playsWithMotionCount %>%
+  filter(motion > 1, atSnap == 0)
+
+filteredPlayerplaysWhereInMotionButNotDuringSnap <- filtered_playerplays %>%
+  filter(motionSinceLineset == 1, inMotionAtBallSnap == 0)
+
+playsWithPlayersIdinMotion <- multiMotionsPlaysWithoutAtSnap %>%
+  left_join(filteredPlayerplaysWhereInMotionButNotDuringSnap, by = c("gameId", "playId"))
+
+# 2) Define a function to process any tracking dataset
+process_tracking <- function(tracking_df, playsWithPlayersIdinMotion, frames_before_snap = 30) {
+  
+  # A) Keep only the motion players
+  tracking_filtered_rows <- tracking_df %>%
+    semi_join(playsWithPlayersIdinMotion, by = c("gameId", "playId", "nflId"))
+  
+  # B) Football for the same plays
+  football_rows <- tracking_df %>%
+    filter(displayName == "football") %>%
+    semi_join(playsWithPlayersIdinMotion, by = c("gameId", "playId"))
+  
+  # C) Combine players + football
+  tracking_with_football <- bind_rows(tracking_filtered_rows, football_rows)
+  
+  # D) Identify snap
+  snapTime <- tracking_with_football %>%
+    filter(displayName == "football", frameType == "SNAP") %>%
+    select(gameId, playId, snapFrameId = frameId)
+  
+  # E) Attach snapFrameId
+  tracking_with_snap <- tracking_with_football %>%
+    left_join(snapTime, by = c("gameId", "playId"))
+  
+  # F) Filter frames [snapFrameId - frames_before_snap, snapFrameId]
+  tracking_pre_snap <- tracking_with_snap %>%
+    filter(frameId >= snapFrameId - frames_before_snap, frameId <= snapFrameId)
+  
+  # G) Sum distance traveled
+  distance_frames <- tracking_pre_snap %>%
+    group_by(gameId, playId, nflId) %>%
+    summarise(distanceMoved = sum(dis, na.rm = TRUE), .groups = "drop")
+  
+  # H) Keep only the highest-distance mover per play
+  highest_distance_per_play <- distance_frames %>%
+    group_by(gameId, playId) %>%
+    slice_max(distanceMoved, with_ties = FALSE) %>%
+    ungroup()
+  
+  highest_distance_per_play
+}
+
+# 3) Process tracking1 to tracking9 and combine
+tracking_list <- list(tracking1, tracking2, tracking3, tracking4,
+                      tracking5, tracking6, tracking7, tracking8, tracking9)
+
+all_highest_distance <- map_dfr(tracking_list, ~ process_tracking(.x, playsWithPlayersIdinMotion, 30))
+
+# 4) Join with playsWithMotionCount to form temp3
+temp3 <- playsWithMotionCount %>%
+  inner_join(all_highest_distance, by = c("gameId", "playId")) %>%
+  mutate(
+    motionSinceLineset = TRUE,
+    inMotionAtBallSnap = 0
+  ) %>% select(-'distanceMoved')
+
+complete_plays <- bind_rows(temp,temp2,temp3,playsWithoutMotion) %>% select (-atSnap) %>% arrange(gameId,playId)
+
+```
+
+```{r echo=FALSE}
+tracking1motion <- tracking1 %>% semi_join(complete_plays, by=c('gameId','playId','nflId')) %>% filter(displayName != "football")
+tracking1BallSnap <- tracking1 %>% filter(displayName == "football" & frameType == "SNAP")
+tracking2motion <- tracking2 %>% semi_join(complete_plays, by=c('gameId','playId','nflId')) %>% filter(displayName != "football")
+tracking2BallSnap <- tracking2 %>% filter(displayName == "football" & frameType == "SNAP")
+tracking3motion <- tracking3 %>% semi_join(complete_plays, by=c('gameId','playId','nflId')) %>% filter(displayName != "football")
+tracking3BallSnap <- tracking3 %>% filter(displayName == "football" & frameType == "SNAP")
+tracking4motion <- tracking4 %>% semi_join(complete_plays, by=c('gameId','playId','nflId')) %>% filter(displayName != "football")
+tracking4BallSnap <- tracking4 %>% filter(displayName == "football" & frameType == "SNAP")
+tracking5motion <- tracking5 %>% semi_join(complete_plays, by=c('gameId','playId','nflId')) %>% filter(displayName != "football")
+tracking5BallSnap <- tracking5 %>% filter(displayName == "football" & frameType == "SNAP")
+tracking6motion <- tracking6 %>% semi_join(complete_plays, by=c('gameId','playId','nflId')) %>% filter(displayName != "football")
+tracking6BallSnap <- tracking6 %>% filter(displayName == "football" & frameType == "SNAP")
+tracking7motion <- tracking7 %>% semi_join(complete_plays, by=c('gameId','playId','nflId')) %>% filter(displayName != "football")
+tracking7BallSnap <- tracking7 %>% filter(displayName == "football" & frameType == "SNAP")
+tracking8motion <- tracking8 %>% semi_join(complete_plays, by=c('gameId','playId','nflId')) %>% filter(displayName != "football")
+tracking8BallSnap <- tracking8 %>% filter(displayName == "football" & frameType == "SNAP")
+tracking9motion <- tracking9 %>% semi_join(complete_plays, by=c('gameId','playId','nflId')) %>% filter(displayName != "football")
+tracking9BallSnap <- tracking9 %>% filter(displayName == "football" & frameType == "SNAP")
+
+trackingAllMotion <- bind_rows(tracking1motion, tracking2motion, tracking3motion, tracking4motion, tracking5motion, tracking6motion, tracking7motion, tracking8motion, tracking9motion) %>% arrange(gameId,playId,nflId)
+trackingAllBallSnap <- bind_rows(tracking1BallSnap, tracking2BallSnap, tracking3BallSnap, tracking4BallSnap, tracking5BallSnap, tracking6BallSnap, tracking7BallSnap, tracking8BallSnap, tracking9BallSnap) %>% arrange(gameId,playId,nflId)
+trackingAllMotionCombined <- bind_rows(trackingAllMotion,trackingAllBallSnap) %>% arrange(gameId,playId)
+
+# Max frameId for "man_in_motion"
+temp_mim <- trackingAllMotion %>%
+  filter(event == "man_in_motion") %>%
+  group_by(gameId, playId) %>%
+  summarize(max_mim_frameId = max(frameId), .groups = "drop")
+
+# Max frameId for "line_set"
+temp_ls <- trackingAllMotion %>%
+  filter(event == "line_set") %>%
+  group_by(gameId, playId) %>%
+  summarize(max_ls_frameId = max(frameId), .groups = "drop")
+
+# Join them and choose which to use
+temp <- temp_ls %>%
+  left_join(temp_mim, by = c("gameId", "playId")) %>%
+  mutate(
+    line_set_frameId = coalesce(max_mim_frameId, max_ls_frameId)
+    # coalesce(x, y) returns x if x is not NA, otherwise y
+  ) %>%
+  select(gameId, playId, line_set_frameId)
+
+
+trackingAllMotionCombined <- trackingAllMotionCombined %>%
+  left_join(temp, by = c("gameId", "playId")) %>%
+  filter(frameId >= line_set_frameId) %>%arrange(gameId,playId,frameId)
+
+
+#Make all plays go to the right for easier analysis
+trackingAllMotionCombined<- trackingAllMotionCombined %>%
+  mutate(
+    x = ifelse(playDirection == "left", 120 - x, x),
+    y = ifelse(playDirection == "left", 53.33 - y, y),
+    playDirection="right")
+
+
+# Get the snap location and frameID for each player
+snap_locations <- trackingAllMotionCombined %>%
+  filter(displayName=="football") %>%
+  select(gameId, playId, snap_x = x, snap_y = y, snap_frameId = frameId)
+
+
+trackingAllMotionCombined<-trackingAllMotionCombined %>%
+  left_join(snap_locations, by = c("gameId", "playId"))
+
+
+ 
+trackingAllMotionCombined <-trackingAllMotionCombined %>% mutate(distance_to_ball_x=round(snap_x-x,2),distance_to_ball_y=round(y-snap_y,2))
+
+# Identify plays with invalid data (distance to line of scrimmage < -0.2)
+invalid_plays <- trackingAllMotionCombined %>%
+  filter(frameType == "SNAP" & distance_to_ball_x < -0.2) %>% # Invalid cases
+  select(gameId, playId) %>%  # Select the invalid play identifiers
+  distinct() # Ensure unique play IDs
+
+# Remove tracking data for these invalid plays
+clean_Tracking <- trackingAllMotionCombined %>%
+  anti_join(invalid_plays, by = c("gameId", "playId")) # Exclude invalid plays
+complete_plays <- complete_plays %>% anti_join(invalid_plays, by = c("gameId", "playId")) # Exclude invalid plays
+
+complete_plays<- complete_plays %>% mutate(isPass=ifelse(is.na(passResult),0,1))
+```
+
+```{r echo=FALSE}
+temp <-playsWithMotionCount %>% select(expectedPoints, expectedPointsAdded,pff_manZone) %>% filter(pff_manZone %in% c('Man','Zone')) %>% filter(expectedPointsAdded > -4 & expectedPointsAdded < 5)
+
+plot1<-ggplot(temp, aes(x = expectedPointsAdded, fill = pff_manZone)) +
+  geom_density(alpha = 0.5) +
+  labs(
+    title = "Density Plot of Expected Points Added by Coverage Type",
+    x = "Expected Points Added",
+    fill = "Coverage Type"
+  ) +
+  xlim(-4, 5) +
+  theme_minimal()
+
+
+
+temp<-complete_plays %>% filter(expectedPoints > -6 & expectedPoints < 6 & pff_manZone %in% c('Man','Zone')) 
+
+plot2<-ggplot(temp, aes(x=expectedPoints, fill=pff_manZone)) +
+  geom_density(alpha = 0.5) +
+  labs(
+    title = "Density Plot of Expected Points by Coverage Type",
+    x = "Expected Points",
+    fill = "Coverage Type"
+  ) +
+  theme_minimal()
+
+grid.arrange(plot1, plot2, widths = c(2))
+```
+
+In the NFL, defensive play-calling is highly influenced by context—field position, down and distance, and the probability that the offense will score. When the expected points before the snap are relatively low—say, when a team is pinned deep in its own territory or facing a third-and-long—defensive coordinators often lean on zone coverage. By assigning defenders to specific areas of the field rather than matching up one-on-one, the defense mitigates the risk of allowing a big play over the top. Admittedly, this approach may concede shorter, underneath passes, but it forces the offense to execute prolonged drives and helps limit explosive plays.
+
+Conversely, when expected points are higher—such as near the red zone or in short-yardage situations—defenses frequently switch to man coverage. In these tighter spaces, a man-to-man scheme can aggressively challenge receivers, demanding that the offense earn every yard. Should the coverage hold, the offense may be pressured into a field goal or even turned away on downs. However, if a receiver separates from his defender, the offense could reap a considerable payoff, gaining sizeable yardage or scoring a touchdown.
+
+These choices manifest in the distribution of expected points added under each coverage. Zone coverage typically produces a narrower range of outcomes, aligning with its “bend but don’t break” philosophy. By preventing long gains, zone keeps offensive production contained, creating a tighter cluster of expected points added. Man coverage, on the other hand, introduces greater variance. Consistent success in man-to-man can stifle an offense, but a single defensive lapse or a perfectly executed route can yield a major gain. As a result, when examining density plots of expected points added, man coverage exhibits a wider spread, reflecting its inherent risk-reward dynamic.
+
+With this groundwork laid, we can now investigate whether teams that utilize motion more frequently also tend to achieve higher expected points added (EPA). Let’s explore how pre-snap motion might tilt the risk-reward equation in the offense’s favor.
+
+```{r echo=FALSE}
+teamsMotion <- complete_plays %>% 
+  group_by(possessionTeam) %>% 
+  summarise(
+    `% of plays with Motion` = mean(motionBoolean),
+    `avg. EPA +`            = mean(expectedPointsAdded),
+    .groups = "drop"
+  ) %>%
+  # Convert each numeric column to its descending rank
+  mutate(
+    across(
+      where(is.numeric),             # only apply to numeric columns
+      ~ rank(desc(.x)),             # descending rank
+      .names = "rank_{.col}"))        # give new columns a prefix "rank_"
+  
+ggplot(teamsMotion, aes(x = `avg. EPA +`, y =`% of plays with Motion`, label = possessionTeam)) +
+  geom_point() +
+  geom_nfl_logos(aes(team_abbr = possessionTeam), width = 0.065, alpha = 0.7) +
+  geom_mean_lines(aes(x0 =`avg. EPA +`  , y0 = `% of plays with Motion`))+
+  labs(
+    title = "Teams by Motion and EPA",
+    x = "avg. EPA +",
+    y = "% of plays with Motion") +
+  theme_minimal() 
+```
+
+The Dolphins and Chiefs stand out for their extensive use of motion, ranking 1st and 2nd in motion usage percentage, respectively. Both teams are highly successful in terms of expected points added (EPA), with the Dolphins ranking 3rd and the Chiefs 2nd in average EPA. On the other hand, the Eagles operate at the opposite end of the spectrum—ranking in the bottom 10 teams for motion usage—but still boast the highest average EPA among teams that rarely incorporate motion.
+
+While there is a slight positive correlation between motion usage and average EPA, it’s not particularly strong. This suggests that motion might contribute to success, but is not the sole factor at play. The question then becomes: are the Dolphins and Chiefs topping the rankings due to their motion-heavy offense, or are they simply strong teams across the board, motion aside?
+
+In the next plot, we’ll explore whether the high EPA of teams like the Dolphins and Chiefs is more a result of their motion strategy, or whether it’s indicative of their general strength as teams. By comparing their EPA with and without motion, we can begin to uncover whether motion usage is a major contributor to their success, or if the correlation seen so far is just coincidental. This analysis will help determine if motion is a game-changing tactic for these top-performing teams or if their excellence is rooted in other factors.
+
+```{r echo=FALSE}
+teamsMotion <- complete_plays %>% 
+  group_by(possessionTeam, motionBoolean) %>%
+  summarise(
+    `avg. EPA +` = mean(expectedPointsAdded),
+    .groups = "drop"
+  ) 
+teamsMotion <- teamsMotion %>% pivot_wider(names_from = motionBoolean, values_from = `avg. EPA +`, names_prefix = "motion_")
+
+
+ggplot(teamsMotion, aes(x = motion_0, y =motion_1, label = possessionTeam)) +
+  geom_point() +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed") +
+  geom_nfl_logos(aes(team_abbr = possessionTeam), width = 0.065, alpha = 0.7) +
+  labs(
+    title = "Teams by Motion and EPA",
+    x = "avg. EPA + without Motion",
+    y = "avg. EPA + with Motion") +
+  theme_minimal()
+```
+
+-   **Top Performers** (Top-Right Quadrant) • Eagles: Excel both with and without motion, showcasing the most balanced offense in the league. • Dolphins: Despite leading in motion usage, their best EPA actually comes from non-motion plays; they still rank fourth in motion-based EPA, underscoring a versatile offense.
+
+-   **Motion-Dependent Teams** (Far Left, High Y-Axis) • Chiefs: Post much higher EPA with motion but struggle without it—justifying their position as the league’s second-most frequent user of motion.
+
+-   **Non-Motion Teams** (Far Right, Low Y-Axis) • Cardinals: Perform notably better without motion, reflecting their sixth-lowest reliance on it.
+
+-   **Struggling Offenses** (Bottom-Left Quadrant) • Texans: Show negative EPA whether they use motion or not, suggesting deeper offensive issues.
+
+-   **Balanced Teams** (around Line) • This show minimal difference in EPA with or without motion, indicating a neutral impact of pre-snap shifts on their results.
+
+#### Focus on Motion and Final Player Alignments
+
+Having established the broader context of how man and zone coverages influence play outcomes, we now shift our attention to the role of pre-snap motion. In particular, we want to see how the final alignment of a motioning player just before the snap interacts with defensive coverage choices. To do this, we leverage tracking data to calculate the distance traveled by the motioning player and categorize their final positioning into four distinct regions: 1. Right behind the offensive line 2. More than three yards behind the line, near or behind the quarterback (a running back–like alignment) 3. Slot (lined up between the offensive line and outside receiver, and no more than 10 yards from the ball at the snap) 4. Outside receiver (lined up near the sideline)
+
+By examining how these different final alignments correlate with man versus zone coverage, we can gain deeper insights into the ways offenses exploit motion to shape defensive responses—and how those defensive adjustments, in turn, affect the overall success of a play.
+
+```{r warning=FALSE, echo=FALSE}
+position <- players %>% select(nflId, position)
+
+
+temp2<-clean_Tracking %>% filter(frameType =='BEFORE_SNAP')%>%
+  group_by(gameId,playId) %>%
+  summarise(distance_moved=sum(dis), y_change= max(y)-min(y),.groups = "drop")
+
+
+temp <- clean_Tracking %>%
+  filter(frameType == "SNAP", displayName != "football") %>%
+  inner_join(position, by = c("nflId")) %>%
+  mutate(
+    positionAtSnap = case_when(
+      abs(distance_to_ball_y) > 9 ~ "Outside",
+      distance_to_ball_x < 3 & abs(distance_to_ball_y) < 4 ~ "Behind Offensive Line",
+      abs(distance_to_ball_y) > 4 & abs(distance_to_ball_y) < 9 ~ "Slot",
+      distance_to_ball_x > 3 & abs(distance_to_ball_y) < 4 ~ "Running Back",
+      TRUE ~ "Other"
+    )
+  ) %>%
+  inner_join(temp2, by = c("gameId", "playId")) %>%
+  inner_join(
+    complete_plays %>% select(gameId, playId, receiverAlignment, expectedPointsAdded, yardsToGo, pff_manZone),
+    by = c("gameId", "playId")
+  )  %>% select(-c('jerseyNumber','playDirection','event','line_set_frameId','frameType','time','o')) %>% arrange(gameId,playId)
+
+
+plotdata<- temp %>%
+  group_by(positionAtSnap, pff_manZone) %>%
+  summarise(
+    mean_epa = mean(expectedPointsAdded, na.rm = TRUE),
+    median_epa = median(expectedPointsAdded, na.rm = TRUE),
+    count = n(),
+    .groups = "drop"
+  ) %>%
+  filter(count > 100) %>%
+  mutate(
+    rank_mean_epa = rank(desc(mean_epa), ties.method = 'average') # Rank after filtering
+  ) %>%
+  arrange(desc(mean_epa))
+plotdata
+```
+
+#### Discussion of Findings
+
+When analyzing the mean and median Expected Points Added (EPA) by coverage type and final position of the player in motion, an intriguing pattern emerges: the highest overall success occurs when the motioning player lines up behind the offensive line—especially against man coverage. This scenario is unique in that both the mean and median EPA are positive, indicating a consistently effective strategy rather than a boom-or-bust approach. One reason for this could be that positioning a player behind the line introduces additional pre-snap complexity, forcing defenders to react quickly and potentially creating mismatches or confusion in coverage assignments.
+
+Meanwhile, although lining up as an outside receiver produces a relatively high mean EPA, the median EPA in these situations is negative. This suggests that while some plays can generate significant yardage—perhaps due to downfield opportunities—others fail to gain traction, resulting in a wide range of outcomes. In essence, the outside alignment carries greater risk, but with a potentially higher reward if the defense is caught off-guard or if the receiver can break free against single coverage.
+
+Overall, the data indicates that aligning players in motion behind the offensive line yields a more consistent path to positive EPA, underscoring the strategic value of that positioning. In the next phase of the analysis, we will take a closer look at these behind-the-line plays in man coverage to determine whether there are specific patterns—such as certain route concepts, run-pass balance, or types of misdirection—that contribute to their success.
+
+```{r echo=FALSE}
+temp4 <- temp %>% filter(positionAtSnap=='Behind Offensive Line' & pff_manZone=='Man') %>% select(gameId, playId, distance_moved, y_change) %>% inner_join(complete_plays, by=c('gameId','playId')) 
+
+
+
+temp4 %>% group_by(isPass) %>% summarise(mean(expectedPointsAdded, .groups=drop))
+
+```
+
+The data suggests that pass plays are particularly successful from this alignment—potentially due to the motioning player enjoying an extra layer of protection and thus finding open space more readily. However, because we have only looked at the first eight weeks of data, further analysis with a full season’s dataset would be needed to confirm whether this pattern holds over a larger sample.
+
+What about the rush Locations in this plays. Do they differ compared to all plays?
+
+```{r echo=FALSE}
+
+b <- complete_plays$rushLocationType %>% table() %>% prop.table() %>% round(2)
+a <- temp4$rushLocationType %>% table() %>% prop.table() %>% round(2)
+
+# Format and print results
+cat("\nPlays where Player in motion lines up right behind Offensive Line:")
+print(a)
+
+cat("\nAll Plays:")
+print(b)
+```
+
+When it comes to rush locations, the data shows no significant shift compared to all other plays. In other words, positioning a player in motion behind the offensive line does not appear to alter the direction or location of running plays. This finding indicates that while this alignment might benefit the passing game, it does not fundamentally change how or where teams choose to run the football.
+
+#### **Further Steps**
+
+Going forward, investigating how pre-snap motion influences defensive confusion and creates mismatches would be valuable. This could involve comparing plays with and without motion to assess whether defenders are slower to react or misaligned when assignments shift just before the snap. Tracking data can help determine if motion disrupts man-to-man matchups by causing hesitation or forces zones to open prematurely. A deeper exploration could confirm whether pre-snap motion not only boosts EPA but also impacts defensive behavior, alignment, and play outcomes.
+
+#### **Acknowledgements**
+
+Thanks to the NFL, Amazon AWS, and Kaggle for providing this rich dataset to explore and analyze.
